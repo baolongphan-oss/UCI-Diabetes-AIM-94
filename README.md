@@ -1,19 +1,18 @@
-# UCI Diabetes Outpatient Monitoring: Patient Risk Classification & Clustering
+# UCI Diabetes Outpatient Monitoring: Hypoglycemia Risk Classification & Clustering
 
 ## Project Overview
 
-End-to-end healthcare analytics project analyzing 29K outpatient monitoring records from 70 diabetic patients (1989-1991). This project demonstrates time-series data engineering, exploratory data analysis, clinical feature engineering, predictive modeling, and unsupervised patient segmentation.
+End-to-end healthcare analytics project on 29K outpatient monitoring records from 70 diabetic patients (1989-1991). The project covers messy clinical time-series cleaning, patient-level feature engineering, hypoglycemia risk classification, and K-Means patient segmentation.
 
-**Key Finding:** Insulin dosing variability, not absolute glucose levels, is the strongest predictor of hypoglycemia risk. A hidden high-risk phenotype (Cluster 1) shows 7x more hypo episodes despite moderate glucose control.
+**Key Finding:** Insulin dosing, not average glucose, tracks hypoglycemia risk. Mean glucose is essentially uncorrelated with hypoglycemic episodes (r = 0.02), while insulin dose variability (r = 0.23) and mean insulin dose (the model's top feature) carry the signal. Clustering surfaced a high-risk group whose glucose profile matches the majority, but whose insulin dosing is 2.5x more variable.
 
-## Datasets
+## Dataset
 
-- **Diabetes Data** (29,330 rows): Time-series outpatient monitoring records with insulin doses, blood glucose readings, meal/exercise logs, and hypoglycemic events
-  - **Structure:** Date, Time, Code, Value (tab-separated)
-  - **Temporal Span:** 1989-1991, 70 individual patients
-  - **Code Mapping:** 9 undocumented codes; 7 clinically meaningful measurement types
+- **Diabetes Data** (29,330 records): Outpatient monitoring logs of insulin doses, blood glucose readings, meal and exercise events, and hypoglycemic symptoms
+  - **Format:** Date, Time, Code, Value (tab-separated), one file per patient
+  - **Span:** 1989-1991, 70 patients
 
-Source: [UCI Machine Learning Repository - Diabetes Data](https://archive.ics.uci.edu/dataset/34/diabetes)
+Source: [UCI Machine Learning Repository: Diabetes](https://archive.ics.uci.edu/dataset/34/diabetes)
 
 ## Project Structure
 
@@ -23,197 +22,117 @@ Source: [UCI Machine Learning Repository - Diabetes Data](https://archive.ics.uc
 ├── uci_diabetes.ipynb
 ├── diabetes-data.tar.Z
 └── Diabetes-Data/
-    ├── data-40  (all 70 patients' records)
-    ├── Data-Codes (code mapping)
-    └── Domain-Description (clinical metadata)
+    ├── data-01 ... data-70   (one file per patient)
+    ├── Data-Codes            (code mapping)
+    └── Domain-Description    (clinical metadata)
 ```
 
-## Notebook Architecture
+## Approach
 
-### UCI Diabetes Outpatient Monitoring Notebook
+### 1. Data Cleaning
+Raw values mixed integers, floats, leading-zero strings (`'007'`), and malformed entries (`'0Hi'`, `'0Lo'`). A `clean_value()` function handles each measurement type:
+- **Insulin:** `float()` to keep half-unit doses (1.5, 2.5)
+- **Blood glucose:** `int(float(val_str))` for string floats like `'354.0'`
+- **Binary indicators:** validated to 0 or 1
 
-**Purpose:** Complete pipeline from raw time-series data to clinical insights
+Undocumented codes (0, 4, 36, 51, 52, 56, 88, 96, 98) were dropped (6.96% of records). Value cleaning left only 0.11% nulls (99.47% retention).
 
-**Key Sections:**
+### 2. Feature Engineering
+Aggregated 29K time-series records into one row per patient (70 rows):
+- **Glucose:** mean, std, min, max, readings above 200 and below 70 mg/dL
+- **Insulin:** mean, std, total (all three insulin types combined)
+- **Clinical risk:** hypoglycemic episode count
+- **Behavioral:** meal and exercise reports
+- **Observation window:** total records, days observed
 
-#### 1. Executive Summary
-Outpatient diabetes data (70 patients, 29K records) used to identify risk profiles and predict hypoglycemia. Key findings: insulin variability is the primary risk driver; K-Means identified three patient phenotypes; well-controlled patients show distinct protective profile.
+### 3. Target Selection: Catching a Circular Target
+The first target, "poor glucose control" (mean glucose > 200 mg/dL, 12 of 70 patients), was built from the same glucose features available to predict it. Correlation analysis confirmed the circularity (glucose_mean r = 0.72 with the target), while every independent feature was weak (|r| < 0.22). The target was dropped in favor of **hypoglycemia risk** (any hypoglycemic episode: 38 yes, 32 no), which is clinically meaningful and not defined by the model's inputs.
 
-#### 2. Data Overview & Quality
-- **Dataset:** 70 diabetic patients, 29,330 measurements (1989-1991)
-- **Codes:** Insulin doses (3 types), blood glucose (8 timepoints), meals/exercise (6 types), hypoglycemic episodes
-- **Data Quality:** 0.11% null values after cleaning (99.47% retention)
-- **Undocumented Codes:** 6.96% of data dropped (codes: 0, 4, 36, 51, 52, 56, 88, 96, 98)
+### 4. Classification: Hypoglycemia Risk
+- **Features:** insulin_mean, insulin_std, meal_reports (strongest independent correlations with the target)
+- **Model:** Random Forest (`max_depth=3`, `n_estimators=50`), kept shallow to limit overfitting on 70 patients
+- **Validation:** 5-fold cross-validation plus an 80/20 train/test split
 
-#### 3. Data Cleaning & Preparation
-Raw data contained mixed types (integers, floats, leading-zero strings '007', malformed values '0Hi', '0Lo'). Developed `clean_value()` function with type-specific handling:
-- **Insulin:** `float()` to preserve 1.5, 2.5 unit doses
-- **Blood Glucose:** `int(float(val_str))` to handle string floats like '354.0'
-- **Binary Indicators:** Validation to [0, 1] range
-- **Result:** Retained 99.47% of data with only 0.11% nulls
+| Metric | Result |
+|---|---|
+| **Cross-validated ROC-AUC** | **0.752 ± 0.096** |
+| Train accuracy | 87.5% |
+| Test accuracy (14 patients) | 78.6% |
 
-#### 4. Feature Engineering
-Aggregated 29K time-series to 70 patient-level features capturing:
-- **Glucose Control:** glucose_mean, glucose_std, glucose_min, glucose_max, glucose_above_200, glucose_below_70
-- **Insulin Management:** insulin_mean, insulin_std, insulin_total (all three types combined)
-- **Clinical Risk:** hypoglycemic_episodes
-- **Behavioral:** meal_reports, exercise_reports
-- **Observational:** total_records, days_observed
+**Feature importance:** insulin_mean (0.381), insulin_std (0.315), meal_reports (0.304)
 
-#### 5. Exploratory Data Analysis
-- **Glucose Distribution:** Mean 160.2 mg/dL, median 149.0 (right-skewed, target ~150)
-- **Temporal Patterns:** Lunch period shows highest glucose spikes (post-lunch median ~250 mg/dL)
-- **Insulin Variability:** NPH insulin most variable (outliers to 400 units/dose); average patient dose 0-20 units (median ~6-7)
-- **Clinical Context:** 12/70 patients at high risk (17%); 38/70 experienced hypo episodes (54%)
+A cross-validated ROC-AUC of 0.75 means fair discrimination: useful as a screening signal, not a diagnostic tool. The wide ± 0.096 reflects the small sample.
 
-#### 6. Correlation Analysis
-**With Hypoglycemic Episodes Target:**
-- meal_reports: 0.232 (highest correlation)
-- insulin_std: 0.225
-- exercise_reports: 0.169
-- insulin_mean: 0.164
-- glucose_std: 0.134
-- glucose_mean: 0.023 (negligible)
-- glucose_below_70: -0.068 (paradoxical)
+*Note: The notebook's confusion matrix is computed on all 70 patients after fitting on those same patients, so it shows in-sample fit rather than performance on unseen patients. Cross-validated ROC-AUC is the reliable measure here.*
 
-**Feature Selection:** Retained meal_reports (0.232), insulin_std (0.225), insulin_mean (0.164); dropped weak features (|r| < 0.16)
+### 5. Clustering: Patient Phenotypes
+**Method:** K-Means (k = 3) on standardized glucose_mean, glucose_std, insulin_mean, hypoglycemic_episodes, and days_observed.
 
-#### 7. Classification Model: Hypoglycemia Prediction
-**Target:** Binary (hypoglycemic_episodes > 0, n=38 True / 32 False, balanced)
-**Model:** Random Forest (max_depth=3, n_estimators=50)
-**Validation:** 5-fold cross-validation
+| Cluster | Patients | Glucose Mean | Glucose Std | Insulin Mean | Insulin Std | Hypo Episodes | Meal Reports |
+|---|---|---|---|---|---|---|---|
+| 0: Stable Majority | 46 (66%) | 172.5 | 86.3 | 7.6 | 5.0 | 3.04 | 7.4 |
+| 1: High Risk | 8 (11%) | 167.9 | 87.9 | 13.3 | 12.5 | 22.38 | 16.9 |
+| 2: Well-Controlled | 16 (23%) | 131.1 | 52.4 | 7.9 | 5.8 | 0.75 | 2.4 |
 
-**Results:**
-- **Cross-Validation ROC-AUC:** 0.752 ± 0.096 (fair discrimination, clinically honest)
-- **Train Accuracy:** 87.5%, **Test Accuracy:** 78.6% (overfitting gap: 8.9%, acceptable)
-- **Confusion Matrix (test set):** TN=27, FP=5, FN=1, TP=37
-- **Classification Report:** Precision=0.88, Recall=0.97, F1=0.93, Accuracy=0.91
+**Cluster 1 (High Risk) vs. Cluster 0 (Majority):**
+- **Glucose looks the same:** mean 167.9 vs. 172.5, variability 87.9 vs. 86.3
+- **Insulin dosing is different:** 75% higher mean dose (13.3 vs. 7.6) and **2.5x higher dose variability** (12.5 vs. 5.0)
+- **More logging activity:** 2.3x more meal reports (16.9 vs. 7.4)
+- **Hypoglycemic episodes:** 7.4x higher (22.38 vs. 3.04). Episode count was a clustering input, so this separation is partly by design.
 
-**Feature Importance:**
-- insulin_mean: 0.381 (strongest)
-- insulin_std: 0.315
-- meal_reports: 0.304
+The notable result is that **insulin variability and meal reports were not clustering inputs**, yet both clearly distinguish the high-risk group. A glucose-only view would not flag these patients.
 
-**Clinical Validation:** Higher insulin doses → increased hypo risk confirmed by clinical literature (insulin overdose is most common cause of hypoglycemia). Model precision (88%) acceptable for screening.
+**Cluster 2 (Well-Controlled):** Lowest glucose mean (131.1) and variability (52.4), and the fewest hypoglycemic episodes (0.75). It also has the fewest meal reports (2.4), so part of its apparent stability may reflect less logging rather than better control.
 
-#### 8. Unsupervised Clustering: Patient Phenotypes
-**Method:** K-Means (k=3) on [glucose_mean, glucose_std, insulin_mean] with StandardScaler
+## Key Findings
 
-**Why 3 features:** Minimal set capturing glucose control, stability, and insulin dosing. Adding insulin_std or meal_reports created extreme outliers or unstable clusters.
+1. **Insulin dosing tracks hypoglycemia risk; average glucose doesn't.** Mean glucose has near-zero correlation with episodes (r = 0.02). Mean insulin dose is the model's strongest feature, consistent with clinical research identifying excess insulin as the most common cause of hypoglycemia.
+2. **A high-risk group hides behind normal-looking glucose.** Cluster 1's glucose profile matches the majority, but its insulin doses are higher and 2.5x more variable.
+3. **Honest targets beat impressive-looking ones.** The first target was circular and was dropped before modeling. The final model's 0.75 ROC-AUC is modest but legitimate.
 
-**Results:**
+## Clinical Implications (Hypotheses to Test)
 
-| Cluster | N (%) | Glucose Mean | Glucose Std | Insulin Mean | Hypo Episodes | Profile |
-|---------|-------|--------------|-------------|--------------|---------------|---------|
-| 0 | 46 (66%) | 172.5 | 28.6 | 7.8 | 3.04 | Stable Majority |
-| 1 | 8 (11%) | 167.9 | 41.2 | 13.3 | 22.38 | **HIGH RISK** |
-| 2 | 16 (23%) | 131.1 | 19.4 | 4.7 | 0.75 | Well-Controlled |
+These come from an observational sample of 70 patients, so they're hypotheses, not recommendations:
+- Patients with highly variable insulin dosing may warrant closer hypoglycemia monitoring, even when average glucose looks normal.
+- Dosing consistency may matter alongside glucose targets. Whether stabilizing doses reduces episodes would require a controlled study.
+- Grouping patients by dosing behavior may identify risk that glucose averages miss.
 
-**Cluster 1 Deep Dive (High-Risk Phenotype):**
-- **Insulin Variability:** 41.2 std (vs 28.6 in Cluster 0) — 2.5x more erratic dosing
-- **Insulin Mean:** 13.3 units (vs 7.8) — 71% higher baseline doses
-- **Meal Engagement:** 16.9 reports (vs 7.4) — more monitoring/intervention
-- **Hypo Episodes:** 22.38 (vs 3.04) — 7.4x higher risk
-- **Clinical Insight:** "Active management paradox" — frequent adjustments + erratic dosing → unpredictable glucose swings → hypoglycemia
-- **At-Risk Patient IDs:** [65, 1, 12, 15, 13, 35, 67, 11]
+## Limitations
 
-**Cluster 2 Protection (Well-Controlled):**
-- Lowest glucose mean (131.1), lowest variability (19.4 std)
-- Minimal hypo episodes (0.75)
-- **Insight:** Stable insulin regimens are protective despite lower absolute doses
+- **Small sample:** 70 patients, with only 14 in the test split, so metrics carry wide uncertainty.
+- **In-sample confusion matrix:** See the note in the Classification section.
+- **Logging behavior as a confounder:** Meal reports and hypoglycemic episodes both depend on how actively a patient logged. Patients who record more may simply show more events.
+- **Clustering includes the outcome:** Hypoglycemic episodes were a clustering input, which partly drives the high-risk group's separation.
+- **Historical data:** 1989-1991 insulin regimens and monitoring practices differ from today's.
+- **Correlation, not causation:** No finding here shows that changing dosing patterns would change outcomes.
 
-#### 9. Key Findings
-1. **Insulin Dosing Variability Predicts Hypoglycemia** — Feature importance ranking: insulin_mean (0.381), insulin_std (0.315), meal_reports (0.304). Variability more predictive than absolute levels.
-2. **Hidden High-Risk Phenotype (Cluster 1)** — 8 patients with 7x more hypo episodes despite moderate glucose control. Insulin variability 2.5x higher, suggesting over-titration paradox.
-3. **Well-Controlled Phenotype (Cluster 2)** — Lowest glucose mean and variability show minimal hypo risk, demonstrating stability is protective.
+## Future Analysis
 
-#### 10. Clinical Implications
-1. **Stabilize, Don't Titrate:** High insulin variability patients need fixed, consistent dosing rather than frequent adjustments
-2. **Continuous Glucose Monitoring:** Cluster 1 patients should use CGM to reduce blind spots and prevent overshooting
-3. **Patient Phenotypes:** One-size-fits-all treatment insufficient; stratify by cluster membership for precision medicine approach
-
-#### 11. Model Limitations
-- Small sample size (70 patients) limits generalization to broader diabetic populations
-- 78.6% test accuracy reflects weak signal in available features; other unmeasured factors (medication compliance, diet, stress) likely important
-- Historical data (1989-1991) may not reflect modern insulin regimens or patient behaviors
-- External validation on independent patient populations required before clinical deployment
-
----
-
-## Key Findings Summary
-
-### Conversion Bottleneck: Insulin Variability, Not Control
-- **Glucose Mean** (glucose level) has near-zero correlation (0.023) with hypo risk
-- **Insulin Std** (dosing variability) has 0.225 correlation — 10x stronger signal
-- **Implication:** Stable insulin regimens are more protective than tight glucose control
-
-### Hidden High-Risk Phenotype (Cluster 1)
-- 8 patients (11% of cohort) with **22.38 hypo episodes** vs 3.04 in stable majority (7.4x higher)
-- Insulin variability **2.5x baseline** despite **moderate glucose control**
-- **Clinical Mechanism:** Over-titration → unpredictable swings → hypoglycemia
-- **Actionable:** Identify via insulin_std & meal_reports; stabilize dosing rather than adjust frequently
-
-### Well-Controlled Phenotype (Cluster 2)
-- 16 patients (23%) with **lowest glucose mean (131.1)** and **lowest variability (19.4)**
-- **Minimal hypo risk (0.75 episodes)**
-- **Proof of concept:** Stable regimens work across all glucose targets
-
----
-
-## Future Analysis Opportunities
-
-- **Prospective Validation:** Test model on 1999-2008 diabetes data (UCI Diabetes 130-Hospitals, 100K+ patients)
-- **Interaction Effects:** Cluster × Time, Cluster × Meal Engagement
-- **Root Cause Analysis:** Why does Cluster 1 have high variability? (Prescribing patterns? Patient factors?)
-- **Treatment Response:** Do Cluster 1 patients respond differently to fixed-dose interventions?
-- **Temporal Modeling:** Time-series forecasting of next glucose reading (LSTM/ARIMA)
-- **Causality:** Does reducing insulin_std causally reduce hypo episodes?
-
----
+- **Cross-validated precision and recall:** Use `cross_val_predict` so every patient is scored by a model that never saw them.
+- **Re-run clustering without hypoglycemic episodes:** Test whether the high-risk group still emerges from glucose and insulin alone.
+- **Control for logging volume:** Normalize counts by days observed or total records.
+- **Validate on a larger cohort:** The 70-patient sample limits generalization.
+- **Time-series modeling:** Forecast near-term hypoglycemia risk from recent insulin and glucose readings.
 
 ## Technical Stack
 
-**Languages & Libraries:**
-- Python 3.x
-- pandas (data manipulation, groupby operations)
-- numpy (numerical operations)
-- scikit-learn (RandomForestClassifier, KMeans, StandardScaler, cross_val_score)
-- matplotlib & seaborn (visualizations)
-- scipy (correlation analysis)
+**Tools:** Python, pandas, NumPy, scikit-learn (RandomForestClassifier, KMeans, StandardScaler, PCA, cross_val_score), matplotlib, seaborn, Jupyter
 
-**Methods:**
-- Time-series aggregation & feature engineering
-- Data quality validation (mixed-type handling, regex parsing)
-- Exploratory data analysis (EDA)
-- Correlation analysis
-- Classification (Random Forest)
-- Unsupervised clustering (K-Means with scaling)
-- Cross-validation (5-fold)
-- Statistical interpretation (ROC-AUC, confusion matrix, feature importance)
-
----
+**Methods:** Clinical time-series cleaning, patient-level feature engineering, correlation analysis, Random Forest classification, 5-fold cross-validation, K-Means clustering, PCA visualization
 
 ## Key Takeaways
 
-1. **Feature Engineering Beats Algorithm:** Insulin variability (engineered from raw doses) matters more than raw glucose readings. Time spent on features > time spent on model tuning.
+1. **Feature engineering mattered more than the algorithm.** Insulin variability, engineered from raw dose logs, carried more signal than raw glucose readings.
+2. **Check the target before trusting the model.** A target built from the model's own inputs will always look predictable.
+3. **Clustering can reveal risk that averages hide.** The high-risk group only stands out once insulin behavior is considered.
 
-2. **Honest Evaluation > Inflated Metrics:** Rejected 0.992 accuracy (circular target) in favor of 0.752 ROC-AUC (legitimate target). Portfolio credibility depends on transparent methodology.
-
-3. **Unsupervised Learning for Discovery:** K-Means found Cluster 1 (high-risk phenotype) that naive glucose metrics would miss. Segmentation > aggregation in healthcare.
-
-4. **The Story Here:** Insulin dosing stability, not glucose control, drives hypo risk. Frequent management adjustments can paradoxically increase risk in vulnerable subgroups.
-
----
-
-## Contact & Links
+## Contact
 
 - **Author:** Long Phan
 - **Email:** lnphan@usc.edu
-- **LinkedIn:** [linkedin.com/in/longphan1912](https://linkedin.com/in/longphan1912)
+- **LinkedIn:** [linkedin.com/in/longphan1912](https://www.linkedin.com/in/longphan1912)
 - **GitHub:** [github.com/baolongphan-oss](https://github.com/baolongphan-oss)
-- **Dataset Source:** [UCI Machine Learning Repository - Diabetes](https://archive.ics.uci.edu/dataset/34/diabetes)
 
 ---
 
-**Last Updated:** September 2026  
-**Project Status:** Portfolio-ready; prospective validation pending
+**Last Updated:** September 2026
